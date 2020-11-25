@@ -37,6 +37,10 @@ impl IdCode {
     pub fn next(&self) -> IdCode {
         IdCode(self.0 + 1)
     }
+
+    pub fn number(self) -> u64 {
+        self.0
+    }
 }
 
 impl FromStr for IdCode {
