@@ -11,7 +11,7 @@ pub fn main() {
     let header = reader.parse_header().unwrap();
     writer.header(&header).unwrap();
 
-    for cmd in reader {
+    while let Some(cmd) = reader.next_command() {
         writer.command(&cmd.unwrap()).unwrap();
     }
 }

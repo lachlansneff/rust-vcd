@@ -1,5 +1,5 @@
 use super::InvalidData;
-use std::io;
+use std::{io, ops::Deref};
 use std::str::{from_utf8, FromStr};
 
 use crate::{
@@ -13,10 +13,88 @@ fn whitespace_byte(b: u8) -> bool {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub struct ValueVector<'a> {
+    v: &'a mut Vec<Value>,
+}
+
+impl<'a> Deref for ValueVector<'a> {
+    type Target = [Value];
+
+    fn deref(&self) -> &Self::Target {
+        self.v
+    }
+}
+impl<'a> Drop for ValueVector<'a> {
+    fn drop(&mut self) {
+        self.v.clear();
+    }
+}
+
+// /// This must either be iterated through or dropped to
+// /// continue using the parser.
+// pub struct ValueVecIter<'a, R: io::Read> {
+//     parser: &'a mut Parser<R>,
+//     consumed: bool,
+// }
+// impl<'a, R: io::Read> Drop for ValueVecIter<'a, R> {
+//     fn drop(&mut self) {
+//         if !self.consumed {
+//             let mut reached_data = false;
+//             loop {
+//                 let b = self.parser.read_byte().unwrap();
+
+//                 if whitespace_byte(b) {
+//                     if reached_data {
+//                         break;
+//                     } else {
+//                         continue;
+//                     }
+//                 }
+//                 reached_data = true;
+//             }
+
+//             let mut buf = [0; 32];
+//             self.parser.read_token(&mut buf).unwrap();
+//         }
+//     }
+// }
+
+// impl<'a, R: io::Read> Iterator for ValueVecIter<'a, R> {
+//     type Item = Value;
+
+//     fn next(&mut self) -> Option<Value> {
+//         if self.consumed {
+//             return None;
+//         }
+
+//         // let mut val = Vec::new();
+//         // loop {
+//         //     let b = self.read_byte()?;
+//         //     if whitespace_byte(b) {
+//         //         if val.len() > 0 {
+//         //             break;
+//         //         } else {
+//         //             continue;
+//         //         }
+//         //     }
+//         //     val.push(Value::parse(b)?);
+//         // }
+//         // let id = self.read_token_parse()?;
+//         // Ok(Command::ChangeVector(id, val))
+
+//         // let b = self.parser.read_byte().unwrap();
+
+//         todo!()
+//     }
+// }
+
+
 /// VCD parser. Wraps an `io::Read` and acts as an iterator of `Command`s.
 pub struct Parser<R: io::Read> {
     bytes_iter: io::Bytes<R>,
     simulation_command: Option<SimulationCommand>,
+    value_change_vector_buffer: Vec<Value>,
 }
 
 impl<R: io::Read> Parser<R> {
@@ -30,6 +108,7 @@ impl<R: io::Read> Parser<R> {
         Parser {
             bytes_iter: r.bytes(),
             simulation_command: None,
+            value_change_vector_buffer: Vec::new(),
         }
     }
 
@@ -134,7 +213,7 @@ impl<R: io::Read> Parser<R> {
         Ok(Some(index))
     }
 
-    fn parse_command(&mut self) -> Result<Command, io::Error> {
+    fn parse_command(&mut self) -> Result<Command<'static>, io::Error> {
         use Command::*;
         use SimulationCommand::*;
 
@@ -201,45 +280,48 @@ impl<R: io::Read> Parser<R> {
         }
     }
 
-    fn begin_simulation_command(&mut self, c: SimulationCommand) -> Result<Command, io::Error> {
+    fn begin_simulation_command(&mut self, c: SimulationCommand) -> Result<Command<'static>, io::Error> {
         self.simulation_command = Some(c);
         Ok(Command::Begin(c))
     }
 
-    fn parse_timestamp(&mut self) -> Result<Command, io::Error> {
+    fn parse_timestamp(&mut self) -> Result<Command<'static>, io::Error> {
         Ok(Command::Timestamp(self.read_token_parse()?))
     }
 
-    fn parse_scalar(&mut self, initial: u8) -> Result<Command, io::Error> {
+    fn parse_scalar(&mut self, initial: u8) -> Result<Command<'static>, io::Error> {
         let id = self.read_token_parse()?;
         let val = Value::parse(initial)?;
         Ok(Command::ChangeScalar(id, val))
     }
 
     fn parse_vector(&mut self) -> Result<Command, io::Error> {
-        let mut val = Vec::new();
+        // let mut val = Vec::new();
         loop {
             let b = self.read_byte()?;
             if whitespace_byte(b) {
-                if val.len() > 0 {
+                if self.value_change_vector_buffer.len() > 0 {
                     break;
                 } else {
                     continue;
                 }
             }
-            val.push(Value::parse(b)?);
+            self.value_change_vector_buffer.push(Value::parse(b)?);
         }
         let id = self.read_token_parse()?;
-        Ok(Command::ChangeVector(id, val))
+
+        Ok(Command::ChangeVector(id, ValueVector {
+            v: &mut self.value_change_vector_buffer,
+        }))
     }
 
-    fn parse_real(&mut self) -> Result<Command, io::Error> {
+    fn parse_real(&mut self) -> Result<Command<'static>, io::Error> {
         let val = self.read_token_parse()?;
         let id = self.read_token_parse()?;
         Ok(Command::ChangeReal(id, val))
     }
 
-    fn parse_string(&mut self) -> Result<Command, io::Error> {
+    fn parse_string(&mut self) -> Result<Command<'static>, io::Error> {
         let val = self.read_token_string()?;
         let id = self.read_token_parse()?;
         Ok(Command::ChangeString(id, val))
@@ -254,7 +336,7 @@ impl<R: io::Read> Parser<R> {
         let mut children = Vec::new();
 
         loop {
-            match self.next() {
+            match self.next_header_command() {
                 Some(Ok(Upscope)) => break,
                 Some(Ok(ScopeDef(tp, id))) => {
                     children.push(ScopeItem::Scope(self.parse_scope(tp, id)?));
@@ -294,7 +376,7 @@ impl<R: io::Read> Parser<R> {
         use Command::*;
         let mut header: Header = Default::default();
         loop {
-            match self.next() {
+            match self.next_header_command() {
                 Some(Ok(Enddefinitions)) => break,
                 Some(Ok(Comment(s))) => {
                     header.comment = Some(s);
@@ -334,11 +416,33 @@ impl<R: io::Read> Parser<R> {
         }
         Ok(header)
     }
-}
 
-impl<P: io::Read> Iterator for Parser<P> {
-    type Item = Result<Command, io::Error>;
-    fn next(&mut self) -> Option<Result<Command, io::Error>> {
+    fn next_header_command(&mut self) -> Option<Result<Command<'static>, io::Error>> {
+        while let Some(b) = self.bytes_iter.next() {
+            let b = match b {
+                Ok(b) => b,
+                Err(e) => return Some(Err(e)),
+            };
+            match b {
+                b' ' | b'\n' | b'\r' | b'\t' => (),
+                b'$' => return Some(self.parse_command()),
+                b'#' => return Some(self.parse_timestamp()),
+                b'0' | b'1' | b'z' | b'Z' | b'x' | b'X' => return Some(self.parse_scalar(b)),
+                // b'b' | b'B' => return Some(self.parse_vector()),
+                b'r' | b'R' => return Some(self.parse_real()),
+                b's' | b'S' => return Some(self.parse_string()),
+                _ => {
+                    return Some(Err(
+                        InvalidData("unexpected character at start of command").into()
+                    ))
+                }
+            }
+        }
+        None
+    }
+
+    /// Unfortunately, since Command has a lifetime, this cannot be an iterator.
+    pub fn next_command(&mut self) -> Option<Result<Command, io::Error>> {
         while let Some(b) = self.bytes_iter.next() {
             let b = match b {
                 Ok(b) => b,
@@ -362,6 +466,33 @@ impl<P: io::Read> Iterator for Parser<P> {
         None
     }
 }
+
+// impl<'a, P: io::Read> Iterator for Parser<P> {
+//     type Item = Result<Command<'a>, io::Error>;
+//     fn next(&'a mut self) -> Option<Result<Command, io::Error>> {
+//         while let Some(b) = self.bytes_iter.next() {
+//             let b = match b {
+//                 Ok(b) => b,
+//                 Err(e) => return Some(Err(e)),
+//             };
+//             match b {
+//                 b' ' | b'\n' | b'\r' | b'\t' => (),
+//                 b'$' => return Some(self.parse_command()),
+//                 b'#' => return Some(self.parse_timestamp()),
+//                 b'0' | b'1' | b'z' | b'Z' | b'x' | b'X' => return Some(self.parse_scalar(b)),
+//                 b'b' | b'B' => return Some(self.parse_vector()),
+//                 b'r' | b'R' => return Some(self.parse_real()),
+//                 b's' | b'S' => return Some(self.parse_string()),
+//                 _ => {
+//                     return Some(Err(
+//                         InvalidData("unexpected character at start of command").into()
+//                     ))
+//                 }
+//             }
+//         }
+//         None
+//     }
+// }
 
 #[cfg(test)]
 mod test {

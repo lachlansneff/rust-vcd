@@ -96,6 +96,7 @@ mod read;
 pub use read::Parser;
 
 mod write;
+use read::ValueVector;
 pub use write::Writer;
 
 mod idcode;
@@ -469,9 +470,9 @@ pub enum ScopeItem {
 }
 
 /// An element in a VCD file.
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq)]
 #[non_exhaustive]
-pub enum Command {
+pub enum Command<'a> {
     /// A `$comment` command
     Comment(String),
 
@@ -503,7 +504,7 @@ pub enum Command {
     ChangeScalar(IdCode, Value),
 
     /// A `b0000 a` change to a vector variable
-    ChangeVector(IdCode, Vec<Value>),
+    ChangeVector(IdCode, ValueVector<'a>),
 
     /// A `r1.234 a` change to a real variable
     ChangeReal(IdCode, f64),
