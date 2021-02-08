@@ -89,10 +89,30 @@ impl<'a> Drop for ValueVector<'a> {
 //     }
 // }
 
+#[derive(Debug)]
+pub struct Bytes<R> {
+    inner: R,
+}
+
+impl<R: io::Read> Iterator for Bytes<R> {
+    type Item = io::Result<u8>;
+
+    fn next(&mut self) -> Option<io::Result<u8>> {
+        let mut byte = 0;
+        loop {
+            return match self.inner.read(std::slice::from_mut(&mut byte)) {
+                Ok(0) => None,
+                Ok(..) => Some(Ok(byte)),
+                Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => Some(Err(e)),
+            };
+        }
+    }
+}
 
 /// VCD parser. Wraps an `io::Read` and acts as an iterator of `Command`s.
 pub struct Parser<R: io::Read> {
-    bytes_iter: io::Bytes<R>,
+    bytes_iter: Bytes<R>,
     simulation_command: Option<SimulationCommand>,
     value_change_vector_buffer: Vec<Value>,
 }
@@ -106,10 +126,14 @@ impl<R: io::Read> Parser<R> {
     /// ```
     pub fn new(r: R) -> Parser<R> {
         Parser {
-            bytes_iter: r.bytes(),
+            bytes_iter: Bytes { inner: r },
             simulation_command: None,
             value_change_vector_buffer: Vec::new(),
         }
+    }
+
+    pub fn reader(&self) -> &R {
+        &self.bytes_iter.inner
     }
 
     fn read_byte(&mut self) -> Result<u8, io::Error> {
